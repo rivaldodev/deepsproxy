@@ -26,6 +26,17 @@ test('Models endpoint returns deepseek-thinking and deepseek-no-thinking', async
   assert.ok(body.data.some((m: any) => m.id === 'deepseek-no-thinking'));
 });
 
+test('Model retrieve endpoint returns OpenAI-compatible model object', async () => {
+  const req = new Request('http://localhost/v1/models/deepseek-no-thinking');
+  const res = await app.fetch(req);
+
+  assert.strictEqual(res.status, 200);
+
+  const body = await res.json();
+  assert.strictEqual(body.id, 'deepseek-no-thinking');
+  assert.strictEqual(body.object, 'model');
+});
+
 test('Chat Completions endpoint with deepseek-thinking (thinking enabled)', async () => {
   // Initialize playwright for this test
   // NOTE: Headless mode can sometimes fail Cloudflare checks. We use headless=false for the test

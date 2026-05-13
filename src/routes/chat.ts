@@ -17,6 +17,175 @@ import { robustParseJSON } from '../utils/json.ts';
 import { registry } from '../tools/registry.ts';
 import type { FunctionToolDefinition } from '../tools/types.ts';
 
+function makeCompletionChoice(message: any, finishReason: string | null = null) {
+  return {
+    index: 0,
+    message,
+    logprobs: null,
+    finish_reason: finishReason,
+  };
+}
+
+function extractToolCalls(content: string) {
+  const toolCalls: any[] = [];
+  const textParts: string[] = [];
+  const toolPattern = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = toolPattern.exec(content)) !== null) {
+    textParts.push(content.slice(lastIndex, match.index));
+    lastIndex = match.index + match[0].length;
+
+    try {
+      const parsed = robustParseJSON(match[1]);
+      if (parsed) {
+        toolCalls.push({
+          id: 'call_' + uuidv4(),
+          type: 'function',
+          function: {
+            name: parsed.name || '',
+            arguments: typeof parsed.arguments === 'object'
+              ? JSON.stringify(parsed.arguments)
+              : String(parsed.arguments || ''),
+          },
+        });
+      }
+    } catch (err) {
+      textParts.push(match[0]);
+    }
+  }
+
+  textParts.push(content.slice(lastIndex));
+
+  return {
+    content: toolCalls.length > 0 ? textParts.join('').trim() || null : content,
+    toolCalls,
+  };
+}
+
+async function collectCompletionResponse(
+  dsStream: ReadableStream,
+  completionId: string,
+  model: string,
+  promptTokens: number,
+  uiSessionId: string
+) {
+  const reader = dsStream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let currentAppendPath = '';
+  let reasoningContent = '';
+  let content = '';
+  let completionTokens = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || !trimmed.startsWith('data: ')) continue;
+
+      const dataStr = trimmed.slice(6);
+      if (dataStr === '[DONE]') continue;
+
+      try {
+        const chunk = JSON.parse(dataStr);
+
+        let dsMessageId: any = null;
+        if (chunk.response_message_id) {
+          dsMessageId = chunk.response_message_id;
+        } else if (chunk.v && typeof chunk.v === 'object') {
+          if (chunk.v.response && chunk.v.response.message_id) {
+            dsMessageId = chunk.v.response.message_id;
+          } else if (chunk.v.message_id) {
+            dsMessageId = chunk.v.message_id;
+          }
+        } else if (chunk.message_id) {
+          dsMessageId = chunk.message_id;
+        }
+
+        if (dsMessageId) {
+          updateSessionParent(uiSessionId, dsMessageId);
+        }
+
+        if (typeof chunk.p === 'string') {
+          currentAppendPath = chunk.p;
+          if (chunk.p === 'response/accumulated_token_usage' && typeof chunk.v === 'number') {
+            completionTokens = chunk.v;
+          }
+        }
+
+        let valueText = '';
+        if (typeof chunk.v === 'string') {
+          valueText = chunk.v;
+        } else if (chunk.v && typeof chunk.v === 'object') {
+          if (chunk.v.response && chunk.v.response.fragments && chunk.v.response.fragments.length > 0) {
+            const frag = chunk.v.response.fragments[0];
+            if (typeof frag.content === 'string') {
+              valueText = frag.content;
+              currentAppendPath = frag.type === 'THINK' ? 'response/thinking_content' : 'response/content';
+            }
+          } else if (Array.isArray(chunk.v) && chunk.v.length > 0) {
+            const firstObj = chunk.v[0];
+            if (typeof firstObj.content === 'string') {
+              valueText = firstObj.content;
+              currentAppendPath = firstObj.type === 'THINK' ? 'response/thinking_content' : 'response/content';
+            }
+          }
+        }
+
+        if (!valueText || valueText === 'FINISHED') continue;
+
+        if (currentAppendPath.includes('thinking_content') || currentAppendPath.includes('THINK')) {
+          reasoningContent += valueText;
+        } else {
+          content += valueText;
+        }
+      } catch (err) {
+        // Ignore malformed or partial chunks.
+      }
+    }
+  }
+
+  const { content: parsedContent, toolCalls } = extractToolCalls(content);
+  const message: any = {
+    role: 'assistant',
+    content: parsedContent,
+  };
+
+  if (reasoningContent) {
+    message.reasoning_content = reasoningContent;
+  }
+
+  if (toolCalls.length > 0) {
+    message.tool_calls = toolCalls;
+  }
+
+  const usage = {
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: promptTokens + completionTokens,
+    prompt_tokens_details: {
+      cached_tokens: 0,
+    },
+  };
+
+  return {
+    id: completionId,
+    object: 'chat.completion',
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [makeCompletionChoice(message, toolCalls.length > 0 ? 'tool_calls' : 'stop')],
+    usage,
+  };
+}
+
 export async function chatCompletions(c: Context) {
   try {
     const body: OpenAIRequest = await c.req.json();
@@ -88,14 +257,16 @@ export async function chatCompletions(c: Context) {
 
     const finalPrompt = systemPrompt ? `${systemPrompt}\n${prompt}` : prompt;
 
-    const isThinkingModel = !body.model.includes('no-thinking');
+    const normalizedModel = body.model.toLowerCase();
+    const isThinkingModel = normalizedModel.includes('reasoner')
+      || (normalizedModel.includes('thinking') && !normalizedModel.includes('no-thinking'));
     
     // A session is new if it doesn't have any assistant messages yet.
     // This handles cases where the first request has [System, User] messages.
     const isNewSession = !messages.some(m => m.role === 'assistant');
 
     // Empty response retry logic
-    let stream: ReadableStream;
+    let stream: ReadableStream | null = null;
     let uiSessionId = '';
     let retries = 3;
     while (retries > 0) {
@@ -113,11 +284,21 @@ export async function chatCompletions(c: Context) {
       }
     }
 
+    const completionId = 'chatcmpl-' + uuidv4();
+    const promptTokens = Math.ceil(finalPrompt.length / 3.5);
+
+    if (!stream) {
+      throw new Error('Failed to initialize DeepSeek stream');
+    }
+
+    if (!isStream) {
+      const response = await collectCompletionResponse(stream, completionId, body.model, promptTokens, uiSessionId);
+      return c.json(response);
+    }
+
     c.header('Content-Type', 'text/event-stream');
     c.header('Cache-Control', 'no-cache');
     c.header('Connection', 'keep-alive');
-
-    const completionId = 'chatcmpl-' + uuidv4();
 
     return honoStream(c, async (streamWriter: any) => {
       const writeEvent = async (data: any) => {
@@ -157,7 +338,6 @@ export async function chatCompletions(c: Context) {
 
       let buffer = '';
       let completionTokens = 0;
-      const promptTokens = Math.ceil(finalPrompt.length / 3.5);
 
       while (true) {
         const { done, value } = await reader.read();

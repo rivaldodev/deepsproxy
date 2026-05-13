@@ -13,6 +13,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { chatCompletions } from './routes/chat.ts';
 import { login } from './routes/login.ts';
+import { models } from './routes/models.ts';
 import * as dotenv from 'dotenv';
 import { initPlaywright } from './services/playwright.ts';
 
@@ -43,31 +44,18 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // OpenAI compatible routes
 app.post('/v1/chat/completions', chatCompletions);
+app.route('/v1/models', models);
+app.post('/chat/completions', chatCompletions);
+app.route('/models', models);
 
-app.get('/v1/models', (c) => {
+app.notFound((c) => {
   return c.json({
-    object: 'list',
-    data: [
-      {
-        id: 'deepseek-thinking',
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'deepseek',
-        permission: [],
-        root: 'deepseek-thinking',
-        parent: null,
-      },
-      {
-        id: 'deepseek-no-thinking',
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: 'deepseek',
-        permission: [],
-        root: 'deepseek-no-thinking',
-        parent: null,
-      }
-    ]
-  });
+    error: {
+      message: `Route not found: ${c.req.method} ${new URL(c.req.url).pathname}`,
+      type: 'invalid_request_error',
+      code: 'route_not_found',
+    },
+  }, 404);
 });
 
 // Initialize playwright when server starts
