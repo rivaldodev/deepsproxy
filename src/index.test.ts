@@ -37,6 +37,22 @@ test('Model retrieve endpoint returns OpenAI-compatible model object', async () 
   assert.strictEqual(body.object, 'model');
 });
 
+test('Responses endpoint is registered', async () => {
+  process.env.TEST_MOCK_PLAYWRIGHT = 'true';
+
+  const req = new Request('http://localhost/v1/responses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'deepseek-no-thinking',
+      input: 'Say ok',
+    }),
+  });
+  const res = await app.fetch(req);
+
+  assert.notStrictEqual(res.status, 404);
+});
+
 test('Chat Completions endpoint with deepseek-thinking (thinking enabled)', async () => {
   // Initialize playwright for this test
   // NOTE: Headless mode can sometimes fail Cloudflare checks. We use headless=false for the test

@@ -14,6 +14,7 @@ import { cors } from 'hono/cors';
 import { chatCompletions } from './routes/chat.ts';
 import { login } from './routes/login.ts';
 import { models } from './routes/models.ts';
+import { responses } from './routes/responses.ts';
 import * as dotenv from 'dotenv';
 import { initPlaywright } from './services/playwright.ts';
 
@@ -44,8 +45,10 @@ app.get('/health', (c) => c.json({ status: 'ok' }));
 
 // OpenAI compatible routes
 app.post('/v1/chat/completions', chatCompletions);
+app.post('/v1/responses', responses);
 app.route('/v1/models', models);
 app.post('/chat/completions', chatCompletions);
+app.post('/responses', responses);
 app.route('/models', models);
 
 app.notFound((c) => {
