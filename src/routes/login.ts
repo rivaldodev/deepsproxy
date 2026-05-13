@@ -219,8 +219,10 @@ login.get('/', async (c) => {
 login.get('/screenshot', async (c) => {
   const page = await ensureLoginPage();
   const screenshot = await page.screenshot({ type: 'png', fullPage: false });
+  const image = new Uint8Array(screenshot.byteLength);
+  image.set(screenshot);
 
-  return c.body(screenshot, 200, {
+  return c.body(image, 200, {
     'Content-Type': 'image/png',
     'Cache-Control': 'no-store',
   });
