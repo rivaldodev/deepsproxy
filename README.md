@@ -372,6 +372,16 @@ docker-compose logs -f
 docker-compose down
 ```
 
+### Login via Coolify/VPS
+
+Quando o app estiver rodando em modo headless na VPS, acesse a rota abaixo pelo dominio do servico para controlar a pagina do Playwright e fazer login no DeepSeek:
+
+```text
+https://SEU-DOMINIO/login?key=SUA_API_KEY
+```
+
+A rota mostra screenshots da sessao do Playwright e encaminha cliques, texto e teclas para o navegador dentro do container. Depois que o login estiver concluido, a sessao fica salva no volume `deepseek_profile`.
+
 ---
 
 ## 🧪 Testes

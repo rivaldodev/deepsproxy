@@ -12,6 +12,7 @@ import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { chatCompletions } from './routes/chat.ts';
+import { login } from './routes/login.ts';
 import * as dotenv from 'dotenv';
 import { initPlaywright } from './services/playwright.ts';
 
@@ -20,6 +21,9 @@ dotenv.config();
 export const app = new Hono();
 
 app.use('*', cors());
+
+// Browser-based remote control for first-time login in headless VPS/Coolify deployments.
+app.route('/login', login);
 
 app.use('*', async (c, next) => {
   const apiKey = process.env.API_KEY;
