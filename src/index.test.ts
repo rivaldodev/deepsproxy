@@ -39,18 +39,48 @@ test('Model retrieve endpoint returns OpenAI-compatible model object', async () 
 
 test('Responses endpoint is registered', async () => {
   process.env.TEST_MOCK_PLAYWRIGHT = 'true';
+  const originalFetch = globalThis.fetch;
+  let capturedPrompt = '';
 
-  const req = new Request('http://localhost/v1/responses', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'deepseek-no-thinking',
-      input: 'Say ok',
-    }),
-  });
-  const res = await app.fetch(req);
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : ('url' in input ? input.url : String(input));
+    if (url.includes('chat.deepseek.com')) {
+      const body = JSON.parse(init?.body as string || '{}');
+      capturedPrompt = body.prompt;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('data: {"p":"response/content","v":"ok"}\n\n'));
+          controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+          controller.close();
+        },
+      });
+      return new Response(stream, { status: 200 });
+    }
+    return originalFetch(input, init);
+  };
 
-  assert.notStrictEqual(res.status, 404);
+  try {
+    const req = new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-no-thinking',
+        instructions: 'System rules',
+        input: [{
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Say ok' }],
+        }],
+      }),
+    });
+    const res = await app.fetch(req);
+
+    assert.notStrictEqual(res.status, 404);
+    assert.ok(capturedPrompt.includes('System rules'));
+    assert.ok(capturedPrompt.includes('User: Say ok'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('Chat Completions endpoint with deepseek-thinking (thinking enabled)', async () => {

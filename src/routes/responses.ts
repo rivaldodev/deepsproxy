@@ -5,13 +5,19 @@ import { createDeepSeekStream, updateSessionParent } from '../services/deepseek.
 import { robustParseJSON } from '../utils/json.ts';
 
 type ResponsesInputItem = {
+  type?: string;
   role?: string;
   content?: unknown;
+  text?: string;
+  output_text?: string;
+  input_text?: string;
+  name?: string;
 };
 
 type ResponsesRequest = {
   model: string;
-  input?: string | ResponsesInputItem[];
+  input?: string | ResponsesInputItem[] | Record<string, unknown>;
+  messages?: ResponsesInputItem[];
   instructions?: string;
   stream?: boolean;
   tools?: any[];
@@ -20,40 +26,81 @@ type ResponsesRequest = {
 
 function contentToText(content: unknown): string {
   if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return content ? JSON.stringify(content) : '';
+  if (!Array.isArray(content)) {
+    if (!content) return '';
+    const part = content as any;
+    if (part.text) return String(part.text);
+    if (part.input_text) return String(part.input_text);
+    if (part.output_text) return String(part.output_text);
+    if (part.content) return contentToText(part.content);
+    return JSON.stringify(content);
+  }
 
   return content.map((part: any) => {
     if (typeof part === 'string') return part;
     if (part?.text) return part.text;
+    if (part?.input_text) return part.input_text;
+    if (part?.output_text) return part.output_text;
+    if (part?.content) return contentToText(part.content);
     if (part?.type === 'input_text' && part?.text) return part.text;
     if (part?.type === 'output_text' && part?.text) return part.text;
     return JSON.stringify(part);
   }).join('\n');
 }
 
+function inputItemToText(item: unknown): string {
+  if (typeof item === 'string') return item;
+  const typedItem = item as ResponsesInputItem;
+  if (typedItem.text) return typedItem.text;
+  if (typedItem.input_text) return typedItem.input_text;
+  if (typedItem.output_text) return typedItem.output_text;
+  return contentToText(typedItem.content ?? typedItem);
+}
+
+function appendPromptLine(prompt: string, role: string | undefined, text: string, name?: string) {
+  const cleanText = text.trim();
+  if (!cleanText) return prompt;
+
+  if (role === 'assistant') {
+    return `${prompt}Assistant: ${cleanText}\n\n`;
+  }
+
+  if (role === 'tool' || role === 'function' || role === 'function_call_output') {
+    return `${prompt}Tool Response (${name || 'tool'}): ${cleanText}\n\n`;
+  }
+
+  return `${prompt}User: ${cleanText}\n\n`;
+}
+
 function buildPrompt(body: ResponsesRequest) {
   let systemPrompt = body.instructions ? `${body.instructions}\n\n` : '';
   let prompt = '';
-  const input = body.input ?? '';
+  const input = body.input ?? body.messages ?? '';
 
   if (typeof input === 'string') {
     prompt = `User: ${input}\n\n`;
-  } else {
-    for (let i = 0; i < input.length; i++) {
-      const item = input[i];
-      const text = contentToText(item.content);
+  } else if (Array.isArray(input)) {
+    for (const item of input) {
+      const role = item.role || (item.type === 'function_call_output' ? 'function_call_output' : undefined);
+      const text = inputItemToText(item);
 
-      if (item.role === 'system') {
-        systemPrompt += `${text}\n\n`;
-      } else if (i === input.length - 1) {
-        if (item.role === 'assistant') {
-          prompt += `Assistant: ${text}\n\n`;
-        } else if (item.role === 'tool' || item.role === 'function') {
-          prompt += `Tool Response: ${text}\n\n`;
-        } else {
-          prompt += `User: ${text}\n\n`;
+      if (role === 'system' || (item.type === 'message' && item.role === 'system')) {
+        if (text.trim()) {
+          systemPrompt += `${text.trim()}\n\n`;
         }
+      } else {
+        prompt = appendPromptLine(prompt, role, text, item.name);
       }
+    }
+  } else {
+    const inputObject = input as Record<string, unknown>;
+    const role = typeof inputObject.role === 'string' ? inputObject.role : undefined;
+    const text = contentToText(input);
+
+    if (role === 'system') {
+      systemPrompt += `${text.trim()}\n\n`;
+    } else {
+      prompt = appendPromptLine(prompt, role, text);
     }
   }
 
