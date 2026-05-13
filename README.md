@@ -346,8 +346,8 @@ deepsproxy/
 services:
   deepsproxy:
     build: .
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
       - PORT=3000
       - PLAYWRIGHT_HEADLESS=true

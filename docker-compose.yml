@@ -2,8 +2,8 @@ version: '3.8'
 services:
   deepsproxy:
     build: .
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
       - PORT=${PORT:-3000}
       - API_KEY=${API_KEY:-sua_api_key_aqui}
