@@ -165,7 +165,7 @@ function buildPrompt(body: ResponsesRequest, includeRegistryTools = false) {
       return tool;
     });
 
-    systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${JSON.stringify(formattedTools, null, 2)}\n\nTo use a tool, output exactly:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\n`;
+    systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${JSON.stringify(formattedTools, null, 2)}\n\nTo use a tool, output exactly:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nRULES:\n1. Use JSON only inside <tool_call> blocks.\n2. After tool results are provided, write the final answer as normal user-facing text, not as a JSON object.\n3. Do not prefix the final answer with SEARCHING, JSON, or status labels.\n\n`;
 
     const forcedTool = body.tool_choice?.function?.name || body.tool_choice?.name;
     if (forcedTool) {
@@ -221,6 +221,33 @@ function parsedToolCallsToResponseCalls(toolCalls: ParsedToolCall[]) {
       ? JSON.stringify(tc.arguments)
       : String(tc.arguments || ''),
   }));
+}
+
+function normalizeAssistantText(text: string) {
+  const trimmed = text.trim();
+  const withoutSearchPrefix = trimmed.replace(/^SEARCHING\s*/i, '').trim();
+  if (!withoutSearchPrefix.startsWith('{')) return trimmed;
+
+  try {
+    const parsed = robustParseJSON(withoutSearchPrefix);
+    if (!parsed || typeof parsed.message !== 'string') return trimmed;
+
+    let finalText = parsed.message.trim();
+    if (Array.isArray(parsed.fontes) && parsed.fontes.length > 0) {
+      const sources = parsed.fontes
+        .filter((source: unknown) => typeof source === 'string' && source.trim())
+        .map((source: string) => `- ${source.trim()}`)
+        .join('\n');
+
+      if (sources && !finalText.includes('## Fontes')) {
+        finalText += `\n\n## Fontes\n${sources}`;
+      }
+    }
+
+    return finalText || trimmed;
+  } catch {
+    return trimmed;
+  }
 }
 
 function shouldAutoExecuteTools(c: Context, body: ResponsesRequest) {
@@ -370,7 +397,7 @@ async function generateResponse(
     const parsed = parseToolCallsFromContent(collected.outputText);
     if (parsed.toolCalls.length === 0) {
       return {
-        text: parsed.textContent,
+        text: normalizeAssistantText(parsed.textContent),
         toolCalls: [],
         completionTokens,
         promptForUsage: prompt,

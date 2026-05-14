@@ -351,3 +351,76 @@ test('responses auto_execute_tools executes registered local tools', async () =>
     registry.unregister(toolName);
   }
 });
+
+test('responses auto_execute_tools normalizes SEARCHING json final answer', async () => {
+  const toolName = 'test_searching_json';
+  if (registry.has(toolName)) registry.unregister(toolName);
+
+  registry.register(
+    toolName,
+    'Returns test search data',
+    {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+      },
+      required: ['query'],
+    },
+    async () => ({ results: [{ title: 'Fonte A', url: 'https://example.com/a' }] })
+  );
+
+  let callCount = 0;
+
+  const restore = setupFetchMock(() => {
+    callCount++;
+
+    const content = callCount === 1
+      ? '<tool_call>\n{"name":"test_searching_json","arguments":{"query":"abc"}}\n</tool_call>'
+      : 'SEARCHING{ "message": "Resposta em markdown.", "codigo": "", "analise": "x", "fontes": ["https://example.com/a"] }';
+
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ p: 'response/content', v: content })}\n\n`));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-no-thinking',
+        input: 'Search and answer',
+        auto_execute_tools: true,
+        tools: [{
+          type: 'function',
+          function: {
+            name: toolName,
+            description: 'Returns test search data',
+            parameters: {
+              type: 'object',
+              properties: {
+                query: { type: 'string' },
+              },
+              required: ['query'],
+            },
+          },
+        }],
+      }),
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.output_text, 'Resposta em markdown.\n\n## Fontes\n- https://example.com/a');
+    assert.strictEqual(body.output[0].content[0].text, body.output_text);
+  } finally {
+    restore();
+    registry.unregister(toolName);
+  }
+});
