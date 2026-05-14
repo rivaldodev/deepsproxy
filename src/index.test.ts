@@ -41,13 +41,11 @@ test('Responses endpoint is registered', async () => {
   process.env.TEST_MOCK_PLAYWRIGHT = 'true';
   const originalFetch = globalThis.fetch;
   let capturedPrompt = '';
-  let capturedPayload: any = null;
 
   globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : ('url' in input ? input.url : String(input));
     if (url.includes('chat.deepseek.com')) {
       const body = JSON.parse(init?.body as string || '{}');
-      capturedPayload = body;
       capturedPrompt = body.prompt;
       const stream = new ReadableStream({
         start(controller) {
@@ -80,7 +78,6 @@ test('Responses endpoint is registered', async () => {
     assert.notStrictEqual(res.status, 404);
     assert.ok(capturedPrompt.includes('System rules'));
     assert.ok(capturedPrompt.includes('User: Say ok'));
-    assert.strictEqual(capturedPayload.model_type, 'expert');
   } finally {
     globalThis.fetch = originalFetch;
   }

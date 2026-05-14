@@ -9,7 +9,6 @@ services:
       - API_KEY=${API_KEY:-sua_api_key_aqui}
       - PLAYWRIGHT_HEADLESS=${PLAYWRIGHT_HEADLESS:-true}
       - PLAYWRIGHT_TIMEOUT=${PLAYWRIGHT_TIMEOUT:-30000}
-      - DEEPSEEK_MODEL_TYPE=${DEEPSEEK_MODEL_TYPE:-expert}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./deepseek_profile:/app/deepseek_profile
