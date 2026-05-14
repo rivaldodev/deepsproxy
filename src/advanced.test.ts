@@ -141,6 +141,68 @@ test('chat non-streaming parses nested DeepSeek content without trailing newline
   }
 });
 
+test('chat non-streaming accepts SSE data lines without space', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data:{"p":"response/content","v":"compact sse"}\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-thinking',
+        messages: [{ role: 'user', content: 'test' }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.choices[0].message.content, 'compact sse');
+  } finally {
+    restore();
+  }
+});
+
+test('chat non-streaming accepts raw JSON stream lines', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('{"p":"response/content","v":"raw json"}\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-thinking',
+        messages: [{ role: 'user', content: 'test' }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.choices[0].message.content, 'raw json');
+  } finally {
+    restore();
+  }
+});
+
 test('chat streaming parses nested DeepSeek content without trailing newline', async () => {
   const restore = setupFetchMock(() => {
     const stream = new ReadableStream({

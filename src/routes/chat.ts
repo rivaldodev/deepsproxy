@@ -138,6 +138,21 @@ function isThinkingPath(path: string) {
     || path.includes('THINK');
 }
 
+function extractSseData(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('data:')) {
+    return trimmed.slice(5).trimStart();
+  }
+
+  if (trimmed.startsWith('{') || trimmed === '[DONE]') {
+    return trimmed;
+  }
+
+  return null;
+}
+
 async function collectCompletionResponse(
   dsStream: ReadableStream,
   completionId: string,
@@ -152,6 +167,7 @@ async function collectCompletionResponse(
   let reasoningContent = '';
   let content = '';
   let completionTokens = 0;
+  const debugChunks: string[] = [];
 
   while (true) {
     const { done, value } = await reader.read();
@@ -165,14 +181,15 @@ async function collectCompletionResponse(
     buffer = done ? '' : (lines.pop() || '');
 
     for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
-      const dataStr = trimmed.slice(6);
+      const dataStr = extractSseData(line);
+      if (!dataStr) continue;
       if (dataStr === '[DONE]') continue;
 
       try {
         const chunk = JSON.parse(dataStr);
+        if (process.env.LOG_LEVEL === 'debug' && debugChunks.length < 20) {
+          debugChunks.push(dataStr.slice(0, 1000));
+        }
 
         const dsMessageId = extractDeepSeekMessageId(chunk);
 
@@ -206,6 +223,10 @@ async function collectCompletionResponse(
     }
 
     if (done) break;
+  }
+
+  if (!content && !reasoningContent && process.env.LOG_LEVEL === 'debug') {
+    console.warn('[chat] DeepSeek stream produced no parsed content. Sample chunks:', debugChunks);
   }
 
   const { content: parsedContent, toolCalls } = extractToolCalls(content);
@@ -406,10 +427,8 @@ export async function chatCompletions(c: Context) {
         buffer = done ? '' : (lines.pop() || '');
 
         for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || !trimmed.startsWith('data: ')) continue;
-          
-          const dataStr = trimmed.slice(6);
+          const dataStr = extractSseData(line);
+          if (!dataStr) continue;
           if (dataStr === '[DONE]') {
             await streamWriter.write('data: [DONE]\n\n');
             continue;

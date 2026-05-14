@@ -247,6 +247,21 @@ function appendToolTurnToPrompt(
   return nextPrompt;
 }
 
+function extractSseData(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('data:')) {
+    return trimmed.slice(5).trimStart();
+  }
+
+  if (trimmed.startsWith('{') || trimmed === '[DONE]') {
+    return trimmed;
+  }
+
+  return null;
+}
+
 async function collectDeepSeekText(dsStream: ReadableStream, uiSessionId: string) {
   const reader = dsStream.getReader();
   const decoder = new TextDecoder();
@@ -265,10 +280,8 @@ async function collectDeepSeekText(dsStream: ReadableStream, uiSessionId: string
     buffer = lines.pop() || '';
 
     for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed || !trimmed.startsWith('data: ')) continue;
-
-      const dataStr = trimmed.slice(6);
+      const dataStr = extractSseData(line);
+      if (!dataStr) continue;
       if (dataStr === '[DONE]') continue;
 
       try {
