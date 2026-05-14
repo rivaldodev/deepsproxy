@@ -24,12 +24,16 @@ export function updateSessionParent(sessionId: string, parentId: number | null) 
 export interface DeepSeekPayload {
   chat_session_id?: string;
   parent_message_id?: number | null;
-  model_type: string | null;
+  model_type: string;
   prompt: string;
   ref_file_ids: string[];
   thinking_enabled: boolean;
   search_enabled: boolean;
   preempt: boolean;
+}
+
+function getModelType() {
+  return process.env.DEEPSEEK_MODEL_TYPE?.trim() || 'expert';
 }
 
 export async function createDeepSeekStream(
@@ -56,7 +60,7 @@ export async function createDeepSeekStream(
   const payload: DeepSeekPayload = {
     chat_session_id: chatSessionId || undefined,
     parent_message_id: actualParentId,
-    model_type: null,
+    model_type: getModelType(),
     prompt: prompt,
     ref_file_ids: [],
     thinking_enabled: enableThinking,
