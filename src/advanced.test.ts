@@ -19,6 +19,53 @@ function setupFetchMock(handler: (url: string, init?: RequestInit) => Response |
   return () => { globalThis.fetch = originalFetch; };
 }
 
+test('web_search tool queries SearXNG and returns simplified results', async () => {
+  const originalFetch = globalThis.fetch;
+  let capturedUrl = '';
+
+  globalThis.fetch = async (input: RequestInfo | URL) => {
+    capturedUrl = typeof input === 'string' ? input : ('url' in input ? input.url : String(input));
+    return new Response(JSON.stringify({
+      results: [{
+        title: 'Result title',
+        url: 'https://example.com/result',
+        content: 'Result snippet',
+        score: 1,
+        engine: 'test-engine',
+        publishedDate: '2026-05-14',
+      }],
+      answers: ['direct answer'],
+      suggestions: ['suggestion'],
+      number_of_results: 1,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  };
+
+  try {
+    const result = await registry.execute('web_search', {
+      query: 'termo com espaço',
+      limit: 1,
+    }, {
+      messages: [],
+      turn: 0,
+      model: 'deepseek-no-thinking',
+    });
+
+    const parsed = JSON.parse(result);
+    assert.ok(capturedUrl.startsWith('http://searxng:8080/search?'));
+    assert.ok(capturedUrl.includes('q=termo+com+espa%C3%A7o'));
+    assert.ok(capturedUrl.includes('format=json'));
+    assert.strictEqual(parsed.query, 'termo com espaço');
+    assert.strictEqual(parsed.results.length, 1);
+    assert.strictEqual(parsed.results[0].url, 'https://example.com/result');
+    assert.deepStrictEqual(parsed.answers, ['direct answer']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('multiturn-thinking-tools: maintains reasoning_content history', async () => {
   let capturedPrompt = '';
 

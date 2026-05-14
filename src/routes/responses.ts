@@ -90,7 +90,27 @@ function appendPromptLine(prompt: string, role: string | undefined, text: string
   return `${prompt}User: ${cleanText}\n\n`;
 }
 
-function buildPrompt(body: ResponsesRequest) {
+function mergeTools(bodyTools: any[] | undefined, includeRegistryTools: boolean) {
+  const tools = Array.isArray(bodyTools) ? [...bodyTools] : [];
+  if (!includeRegistryTools) return tools;
+
+  const seen = new Set(tools.map((tool: any) => {
+    if (tool.type === 'function' && tool.function?.name) return tool.function.name;
+    if (tool.type === 'function' && tool.name) return tool.name;
+    return '';
+  }).filter(Boolean));
+
+  for (const tool of registry.toOpenAITools()) {
+    if (!seen.has(tool.function.name)) {
+      tools.push(tool);
+      seen.add(tool.function.name);
+    }
+  }
+
+  return tools;
+}
+
+function buildPrompt(body: ResponsesRequest, includeRegistryTools = false) {
   let systemPrompt = body.instructions ? `${body.instructions}\n\n` : '';
   let prompt = '';
   const input = body.input ?? body.messages ?? '';
@@ -122,8 +142,10 @@ function buildPrompt(body: ResponsesRequest) {
     }
   }
 
-  if (body.tools && Array.isArray(body.tools) && body.tools.length > 0) {
-    const formattedTools = body.tools.map((tool: any) => {
+  const tools = mergeTools(body.tools, includeRegistryTools);
+
+  if (tools.length > 0) {
+    const formattedTools = tools.map((tool: any) => {
       if (tool.type === 'function' && tool.function) {
         return {
           name: tool.function.name,
@@ -395,11 +417,11 @@ function responseUsage(prompt: string, completionTokens: number) {
 export async function responses(c: Context) {
   try {
     const body: ResponsesRequest = await c.req.json();
-    const prompt = buildPrompt(body);
+    const autoExecuteTools = shouldAutoExecuteTools(c, body);
+    const prompt = buildPrompt(body, autoExecuteTools);
     const normalizedModel = body.model.toLowerCase();
     const isThinkingModel = normalizedModel.includes('reasoner')
       || (normalizedModel.includes('thinking') && !normalizedModel.includes('no-thinking'));
-    const autoExecuteTools = shouldAutoExecuteTools(c, body);
     const responseId = 'resp_' + uuidv4();
 
     if (body.stream) {
