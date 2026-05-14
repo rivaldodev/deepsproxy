@@ -4,6 +4,7 @@ import assert from 'node:assert';
 process.env.TEST_MOCK_PLAYWRIGHT = 'true';
 
 import { app } from './index.ts';
+import { registry } from './tools/registry.ts';
 
 // Helper to mock the fetch global for testing empty response retry and caching logic
 function setupFetchMock(handler: (url: string, init?: RequestInit) => Response | Promise<Response>) {
@@ -222,5 +223,84 @@ test('session-parent-tracking: appends messages using response message_id as par
     assert.strictEqual(capturedPayloads[1].prompt, 'User: Turn 2\n\n', 'Should only send the last message');
   } finally {
     restore();
+  }
+});
+
+test('responses auto_execute_tools executes registered local tools', async () => {
+  const toolName = 'test_lookup';
+  if (registry.has(toolName)) registry.unregister(toolName);
+
+  registry.register(
+    toolName,
+    'Looks up a test value',
+    {
+      type: 'object',
+      properties: {
+        key: { type: 'string' },
+      },
+      required: ['key'],
+    },
+    async (args) => ({ value: `result:${args.key}` })
+  );
+
+  const prompts: string[] = [];
+  let callCount = 0;
+
+  const restore = setupFetchMock((url, init) => {
+    const bodyObj = JSON.parse(init?.body as string || '{}');
+    prompts.push(bodyObj.prompt);
+    callCount++;
+
+    const content = callCount === 1
+      ? '<tool_call>\n{"name":"test_lookup","arguments":{"key":"abc"}}\n</tool_call>'
+      : 'Final answer from tool result.';
+
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ p: 'response/content', v: content })}\n\n`));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/responses', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-no-thinking',
+        input: 'Use the lookup tool',
+        auto_execute_tools: true,
+        tools: [{
+          type: 'function',
+          function: {
+            name: toolName,
+            description: 'Looks up a test value',
+            parameters: {
+              type: 'object',
+              properties: {
+                key: { type: 'string' },
+              },
+              required: ['key'],
+            },
+          },
+        }],
+      }),
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.output_text, 'Final answer from tool result.');
+    assert.strictEqual(body.output[0].type, 'message');
+    assert.strictEqual(callCount, 2);
+    assert.ok(prompts[1].includes('Tool Response (test_lookup):'));
+    assert.ok(prompts[1].includes('result:abc'));
+  } finally {
+    restore();
+    registry.unregister(toolName);
   }
 });

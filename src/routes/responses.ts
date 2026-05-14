@@ -3,6 +3,9 @@ import { stream as honoStream } from 'hono/streaming';
 import { v4 as uuidv4 } from 'uuid';
 import { createDeepSeekStream, updateSessionParent } from '../services/deepseek.ts';
 import { robustParseJSON } from '../utils/json.ts';
+import { executeToolCalls, parseToolCallsFromContent } from '../tools/executor.ts';
+import { registry } from '../tools/registry.ts';
+import type { ParsedToolCall, ToolCallResult } from '../tools/types.ts';
 
 type ResponsesInputItem = {
   type?: string;
@@ -22,6 +25,21 @@ type ResponsesRequest = {
   stream?: boolean;
   tools?: any[];
   tool_choice?: any;
+  auto_execute_tools?: boolean;
+  max_tool_turns?: number;
+};
+
+type CollectedResponse = {
+  outputText: string;
+  reasoningText: string;
+  completionTokens: number;
+};
+
+type GeneratedResponse = {
+  text: string;
+  toolCalls: any[];
+  completionTokens: number;
+  promptForUsage: string;
 };
 
 function contentToText(content: unknown): string {
@@ -171,6 +189,64 @@ function extractToolCalls(content: string) {
   };
 }
 
+function parsedToolCallsToResponseCalls(toolCalls: ParsedToolCall[]) {
+  return toolCalls.map((tc) => ({
+    id: 'fc_' + uuidv4(),
+    type: 'function_call',
+    call_id: tc.id,
+    name: tc.name,
+    arguments: typeof tc.arguments === 'object'
+      ? JSON.stringify(tc.arguments)
+      : String(tc.arguments || ''),
+  }));
+}
+
+function shouldAutoExecuteTools(c: Context, body: ResponsesRequest) {
+  const header = c.req.header('X-Auto-Execute-Tools')?.toLowerCase();
+  return body.auto_execute_tools === true
+    || header === 'true'
+    || process.env.AUTO_EXECUTE_TOOLS === 'true';
+}
+
+function inputAsToolContextMessages(body: ResponsesRequest): unknown[] {
+  if (Array.isArray(body.input)) return body.input;
+  if (Array.isArray(body.messages)) return body.messages;
+  if (body.input) return [body.input];
+  return [];
+}
+
+function appendToolTurnToPrompt(
+  prompt: string,
+  assistantText: string,
+  toolCalls: ParsedToolCall[],
+  toolResults: ToolCallResult[]
+) {
+  let nextPrompt = prompt;
+  const assistantLines: string[] = [];
+
+  if (assistantText.trim()) {
+    assistantLines.push(assistantText.trim());
+  }
+
+  for (const tc of toolCalls) {
+    assistantLines.push([
+      '<tool_call>',
+      JSON.stringify({ name: tc.name, arguments: tc.arguments }),
+      '</tool_call>',
+    ].join('\n'));
+  }
+
+  if (assistantLines.length > 0) {
+    nextPrompt += `Assistant: ${assistantLines.join('\n')}\n\n`;
+  }
+
+  for (const result of toolResults) {
+    nextPrompt += `Tool Response (${result.name}): ${result.result}\n\n`;
+  }
+
+  return nextPrompt;
+}
+
 async function collectDeepSeekText(dsStream: ReadableStream, uiSessionId: string) {
   const reader = dsStream.getReader();
   const decoder = new TextDecoder();
@@ -243,6 +319,69 @@ async function collectDeepSeekText(dsStream: ReadableStream, uiSessionId: string
   return { outputText, reasoningText, completionTokens };
 }
 
+async function generateResponse(
+  body: ResponsesRequest,
+  initialPrompt: string,
+  isThinkingModel: boolean,
+  autoExecuteTools: boolean
+): Promise<GeneratedResponse> {
+  let prompt = initialPrompt;
+  let completionTokens = 0;
+  const maxToolTurns = Math.max(1, Math.min(body.max_tool_turns ?? 10, 25));
+  const contextMessages = inputAsToolContextMessages(body);
+
+  for (let turn = 0; turn < maxToolTurns; turn++) {
+    const result = await createDeepSeekStream(prompt, isThinkingModel, null);
+    const collected: CollectedResponse = await collectDeepSeekText(result.stream, result.uiSessionId);
+    completionTokens += collected.completionTokens;
+
+    if (!autoExecuteTools) {
+      const extracted = extractToolCalls(collected.outputText);
+      return {
+        text: extracted.text,
+        toolCalls: extracted.toolCalls,
+        completionTokens,
+        promptForUsage: prompt,
+      };
+    }
+
+    const parsed = parseToolCallsFromContent(collected.outputText);
+    if (parsed.toolCalls.length === 0) {
+      return {
+        text: parsed.textContent,
+        toolCalls: [],
+        completionTokens,
+        promptForUsage: prompt,
+      };
+    }
+
+    const allToolsAreLocal = parsed.toolCalls.every((tc) => registry.has(tc.name));
+    if (!allToolsAreLocal) {
+      return {
+        text: parsed.textContent,
+        toolCalls: parsedToolCallsToResponseCalls(parsed.toolCalls),
+        completionTokens,
+        promptForUsage: prompt,
+      };
+    }
+
+    const toolResults = await executeToolCalls(parsed.toolCalls, {
+      messages: contextMessages,
+      turn,
+      model: body.model,
+    });
+
+    prompt = appendToolTurnToPrompt(
+      prompt,
+      parsed.textContent,
+      parsed.toolCalls,
+      toolResults
+    );
+  }
+
+  throw new Error(`Tool execution loop exceeded maximum turns (${maxToolTurns})`);
+}
+
 function responseUsage(prompt: string, completionTokens: number) {
   const inputTokens = Math.ceil(prompt.length / 3.5);
 
@@ -260,8 +399,7 @@ export async function responses(c: Context) {
     const normalizedModel = body.model.toLowerCase();
     const isThinkingModel = normalizedModel.includes('reasoner')
       || (normalizedModel.includes('thinking') && !normalizedModel.includes('no-thinking'));
-
-    const result = await createDeepSeekStream(prompt, isThinkingModel, null);
+    const autoExecuteTools = shouldAutoExecuteTools(c, body);
     const responseId = 'resp_' + uuidv4();
 
     if (body.stream) {
@@ -280,8 +418,8 @@ export async function responses(c: Context) {
           },
         })}\n\n`);
 
-        const collected = await collectDeepSeekText(result.stream, result.uiSessionId);
-        const { text, toolCalls } = extractToolCalls(collected.outputText);
+        const generated = await generateResponse(body, prompt, isThinkingModel, autoExecuteTools);
+        const { text, toolCalls } = generated;
 
         if (text) {
           await streamWriter.write(`data: ${JSON.stringify({
@@ -314,15 +452,15 @@ export async function responses(c: Context) {
             model: body.model,
             output,
             output_text: text,
-            usage: responseUsage(prompt, collected.completionTokens),
+            usage: responseUsage(generated.promptForUsage, generated.completionTokens),
           },
         })}\n\n`);
         await streamWriter.write('data: [DONE]\n\n');
       });
     }
 
-    const collected = await collectDeepSeekText(result.stream, result.uiSessionId);
-    const { text, toolCalls } = extractToolCalls(collected.outputText);
+    const generated = await generateResponse(body, prompt, isThinkingModel, autoExecuteTools);
+    const { text, toolCalls } = generated;
     const output = toolCalls.length > 0
       ? toolCalls
       : [{
@@ -347,7 +485,7 @@ export async function responses(c: Context) {
       model: body.model,
       output,
       output_text: text,
-      usage: responseUsage(prompt, collected.completionTokens),
+      usage: responseUsage(generated.promptForUsage, generated.completionTokens),
     });
   } catch (err: any) {
     console.error('Error in responses:', err);
