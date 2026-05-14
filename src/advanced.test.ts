@@ -110,6 +110,86 @@ test('streaming-whitespace: preserves exact whitespace', async () => {
   }
 });
 
+test('chat non-streaming parses nested DeepSeek content without trailing newline', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"v":{"response":{"message_id":7,"content":"nested answer"}}}'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-thinking',
+        messages: [{ role: 'user', content: 'test' }]
+      })
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    assert.strictEqual(body.choices[0].message.content, 'nested answer');
+  } finally {
+    restore();
+  }
+});
+
+test('chat streaming parses nested DeepSeek content without trailing newline', async () => {
+  const restore = setupFetchMock(() => {
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"v":{"response":{"message_id":8,"content":"stream nested"}}}'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-thinking',
+        messages: [{ role: 'user', content: 'test' }],
+        stream: true
+      })
+    });
+
+    const res = await app.fetch(req);
+    const reader = res.body?.getReader();
+    const decoder = new TextDecoder();
+    let full = '';
+
+    while (true) {
+      const { done, value } = await reader!.read();
+      if (done) break;
+      const chunk = decoder.decode(value);
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.choices?.[0]?.delta?.content) {
+              full += data.choices[0].delta.content;
+            }
+          } catch(e) {}
+        }
+      }
+    }
+
+    assert.strictEqual(full, 'stream nested');
+  } finally {
+    restore();
+  }
+});
+
 test('caching-streaming and cache-control: returns prompt_tokens_details', async () => {
   const restore = setupFetchMock((url) => {
     const stream = new ReadableStream({

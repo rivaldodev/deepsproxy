@@ -64,6 +64,80 @@ function extractToolCalls(content: string) {
   };
 }
 
+function extractDeepSeekMessageId(chunk: any) {
+  return chunk.response_message_id
+    || chunk.message_id
+    || chunk.v?.message_id
+    || chunk.v?.response?.message_id
+    || chunk.data?.message_id
+    || chunk.data?.response?.message_id;
+}
+
+function findFirstStringByKey(value: unknown, keys: Set<string>): string {
+  if (!value || typeof value !== 'object') return '';
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findFirstStringByKey(item, keys);
+      if (found) return found;
+    }
+    return '';
+  }
+
+  const obj = value as Record<string, unknown>;
+  for (const key of keys) {
+    if (typeof obj[key] === 'string') {
+      return obj[key] as string;
+    }
+  }
+
+  for (const nested of Object.values(obj)) {
+    const found = findFirstStringByKey(nested, keys);
+    if (found) return found;
+  }
+
+  return '';
+}
+
+function extractDeepSeekText(chunk: any): { text: string; path?: string } {
+  if (typeof chunk.v === 'string') {
+    return { text: chunk.v, path: chunk.p };
+  }
+
+  const value = chunk.v ?? chunk.data;
+  if (value?.response?.fragments?.[0]?.content) {
+    const frag = value.response.fragments[0];
+    return {
+      text: frag.content,
+      path: frag.type === 'THINK' ? 'response/thinking_content' : 'response/content',
+    };
+  }
+
+  if (Array.isArray(value) && value[0]?.content) {
+    const frag = value[0];
+    return {
+      text: frag.content,
+      path: frag.type === 'THINK' ? 'response/thinking_content' : 'response/content',
+    };
+  }
+
+  const text = findFirstStringByKey(value, new Set([
+    'content',
+    'thinking_content',
+    'reasoning_content',
+    'text',
+    'answer',
+  ]));
+
+  return { text, path: chunk.p };
+}
+
+function isThinkingPath(path: string) {
+  return path.includes('thinking_content')
+    || path.includes('reasoning_content')
+    || path.includes('THINK');
+}
+
 async function collectCompletionResponse(
   dsStream: ReadableStream,
   completionId: string,
@@ -81,11 +155,14 @@ async function collectCompletionResponse(
 
   while (true) {
     const { done, value } = await reader.read();
-    if (done) break;
+    if (done) {
+      if (!buffer) break;
+    } else {
+      buffer += decoder.decode(value, { stream: true });
+    }
 
-    buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
+    buffer = done ? '' : (lines.pop() || '');
 
     for (const line of lines) {
       const trimmed = line.trim();
@@ -97,18 +174,7 @@ async function collectCompletionResponse(
       try {
         const chunk = JSON.parse(dataStr);
 
-        let dsMessageId: any = null;
-        if (chunk.response_message_id) {
-          dsMessageId = chunk.response_message_id;
-        } else if (chunk.v && typeof chunk.v === 'object') {
-          if (chunk.v.response && chunk.v.response.message_id) {
-            dsMessageId = chunk.v.response.message_id;
-          } else if (chunk.v.message_id) {
-            dsMessageId = chunk.v.message_id;
-          }
-        } else if (chunk.message_id) {
-          dsMessageId = chunk.message_id;
-        }
+        const dsMessageId = extractDeepSeekMessageId(chunk);
 
         if (dsMessageId) {
           updateSessionParent(uiSessionId, dsMessageId);
@@ -121,28 +187,15 @@ async function collectCompletionResponse(
           }
         }
 
-        let valueText = '';
-        if (typeof chunk.v === 'string') {
-          valueText = chunk.v;
-        } else if (chunk.v && typeof chunk.v === 'object') {
-          if (chunk.v.response && chunk.v.response.fragments && chunk.v.response.fragments.length > 0) {
-            const frag = chunk.v.response.fragments[0];
-            if (typeof frag.content === 'string') {
-              valueText = frag.content;
-              currentAppendPath = frag.type === 'THINK' ? 'response/thinking_content' : 'response/content';
-            }
-          } else if (Array.isArray(chunk.v) && chunk.v.length > 0) {
-            const firstObj = chunk.v[0];
-            if (typeof firstObj.content === 'string') {
-              valueText = firstObj.content;
-              currentAppendPath = firstObj.type === 'THINK' ? 'response/thinking_content' : 'response/content';
-            }
-          }
+        const extracted = extractDeepSeekText(chunk);
+        if (extracted.path) {
+          currentAppendPath = extracted.path;
         }
+        const valueText = extracted.text;
 
         if (!valueText || valueText === 'FINISHED') continue;
 
-        if (currentAppendPath.includes('thinking_content') || currentAppendPath.includes('THINK')) {
+        if (isThinkingPath(currentAppendPath)) {
           reasoningContent += valueText;
         } else {
           content += valueText;
@@ -151,6 +204,8 @@ async function collectCompletionResponse(
         // Ignore malformed or partial chunks.
       }
     }
+
+    if (done) break;
   }
 
   const { content: parsedContent, toolCalls } = extractToolCalls(content);
@@ -341,11 +396,14 @@ export async function chatCompletions(c: Context) {
 
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          if (!buffer) break;
+        } else {
+          buffer += decoder.decode(value, { stream: true });
+        }
 
-        buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        buffer = done ? '' : (lines.pop() || '');
 
         for (const line of lines) {
           const trimmed = line.trim();
@@ -360,27 +418,11 @@ export async function chatCompletions(c: Context) {
           try {
             const chunk = JSON.parse(dataStr);
 
-            // Extract message_id for session tracking to avoid overwriting messages
-            let dsMessageId: any = null;
-            if (chunk.response_message_id) {
-              dsMessageId = chunk.response_message_id;
-            } else if (chunk.v && typeof chunk.v === 'object') {
-              if (chunk.v.response && chunk.v.response.message_id) {
-                dsMessageId = chunk.v.response.message_id;
-              } else if (chunk.v.message_id) {
-                dsMessageId = chunk.v.message_id;
-              }
-            } else if (chunk.message_id) {
-              dsMessageId = chunk.message_id;
-            }
+            const dsMessageId = extractDeepSeekMessageId(chunk);
 
             if (dsMessageId) {
               updateSessionParent(uiSessionId, dsMessageId);
             }
-
-            let vStr = '';
-            let foundStr = false;
-            let isThinkingChunk = false;
 
             if (typeof chunk.p === 'string') {
               currentAppendPath = chunk.p;
@@ -389,35 +431,15 @@ export async function chatCompletions(c: Context) {
               }
             }
 
-            // Extract string value
-            if (typeof chunk.v === 'string') {
-              vStr = chunk.v;
-              foundStr = true;
-            } else if (chunk.v && typeof chunk.v === 'object') {
-              // Handle old fragments format if it ever occurs
-              if (chunk.v.response && chunk.v.response.fragments && chunk.v.response.fragments.length > 0) {
-                const frag = chunk.v.response.fragments[0];
-                if (typeof frag.content === 'string') {
-                  vStr = frag.content;
-                  foundStr = true;
-                  currentAppendPath = frag.type === 'THINK' ? 'response/thinking_content' : 'response/content';
-                }
-              } else if (Array.isArray(chunk.v) && chunk.v.length > 0) {
-                const firstObj = chunk.v[0];
-                if (typeof firstObj.content === 'string') {
-                  vStr = firstObj.content;
-                  foundStr = true;
-                  currentAppendPath = firstObj.type === 'THINK' ? 'response/thinking_content' : 'response/content';
-                }
-              }
+            const extracted = extractDeepSeekText(chunk);
+            if (extracted.path) {
+              currentAppendPath = extracted.path;
             }
 
-            // Determine if it's thinking based on the current path
-            if (currentAppendPath.includes('thinking_content') || currentAppendPath.includes('THINK')) {
-              isThinkingChunk = true;
-            }
+            const vStr = extracted.text;
+            const isThinkingChunk = isThinkingPath(currentAppendPath);
 
-            if (foundStr && vStr !== '') {
+            if (vStr !== '') {
               if (vStr === 'FINISHED') continue;
 
               const delta: ChoiceDelta = {};
@@ -538,6 +560,8 @@ export async function chatCompletions(c: Context) {
             // parse error, ignore partial chunk
           }
         }
+
+        if (done) break;
       }
 
       // Flush any remaining content emit buffer
