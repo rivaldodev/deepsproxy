@@ -32,6 +32,10 @@ export interface DeepSeekPayload {
   preempt: boolean;
 }
 
+function getModelType(): string | null {
+  return process.env.DEEPSEEK_MODEL_TYPE?.trim() || null;
+}
+
 export async function createDeepSeekStream(
   prompt: string, 
   enableThinking: boolean, 
@@ -56,7 +60,7 @@ export async function createDeepSeekStream(
   const payload: DeepSeekPayload = {
     chat_session_id: chatSessionId || undefined,
     parent_message_id: actualParentId,
-    model_type: null,
+    model_type: getModelType(),
     prompt: prompt,
     ref_file_ids: [],
     thinking_enabled: enableThinking,
