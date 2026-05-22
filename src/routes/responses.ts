@@ -90,27 +90,7 @@ function appendPromptLine(prompt: string, role: string | undefined, text: string
   return `${prompt}User: ${cleanText}\n\n`;
 }
 
-function mergeTools(bodyTools: any[] | undefined, includeRegistryTools: boolean) {
-  const tools = Array.isArray(bodyTools) ? [...bodyTools] : [];
-  if (!includeRegistryTools) return tools;
-
-  const seen = new Set(tools.map((tool: any) => {
-    if (tool.type === 'function' && tool.function?.name) return tool.function.name;
-    if (tool.type === 'function' && tool.name) return tool.name;
-    return '';
-  }).filter(Boolean));
-
-  for (const tool of registry.toOpenAITools()) {
-    if (!seen.has(tool.function.name)) {
-      tools.push(tool);
-      seen.add(tool.function.name);
-    }
-  }
-
-  return tools;
-}
-
-function buildPrompt(body: ResponsesRequest, includeRegistryTools = false) {
+function buildPrompt(body: ResponsesRequest) {
   let systemPrompt = body.instructions ? `${body.instructions}\n\n` : '';
   let prompt = '';
   const input = body.input ?? body.messages ?? '';
@@ -142,7 +122,7 @@ function buildPrompt(body: ResponsesRequest, includeRegistryTools = false) {
     }
   }
 
-  const tools = mergeTools(body.tools, includeRegistryTools);
+  const tools = Array.isArray(body.tools) ? body.tools : [];
 
   if (tools.length > 0) {
     const formattedTools = tools.map((tool: any) => {
@@ -445,7 +425,7 @@ export async function responses(c: Context) {
   try {
     const body: ResponsesRequest = await c.req.json();
     const autoExecuteTools = shouldAutoExecuteTools(c, body);
-    const prompt = buildPrompt(body, autoExecuteTools);
+    const prompt = buildPrompt(body);
     const normalizedModel = body.model.toLowerCase();
     const isThinkingModel = normalizedModel.includes('reasoner')
       || (normalizedModel.includes('thinking') && !normalizedModel.includes('no-thinking'));

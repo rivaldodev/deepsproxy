@@ -14,8 +14,6 @@ import { v4 as uuidv4 } from 'uuid';
 import { createDeepSeekStream, updateSessionParent } from '../services/deepseek.ts';
 import { OpenAIRequest, ChoiceDelta, Message } from '../utils/types.ts';
 import { robustParseJSON } from '../utils/json.ts';
-import { registry } from '../tools/registry.ts';
-import type { FunctionToolDefinition } from '../tools/types.ts';
 
 function makeCompletionChoice(message: any, finishReason: string | null = null) {
   return {
@@ -247,7 +245,7 @@ export async function chatCompletions(c: Context) {
       });
       const toolsJson = JSON.stringify(formattedTools, null, 2);
       
-      systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nRULES:\n1. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n2. Do NOT output any other text after your <tool_call> blocks. Wait for the user to provide the tool response.\n3. The JSON must be valid and accurately follow the tool's parameters.\n\n`;
+      systemPrompt += `\n\n# TOOLS AVAILABLE\nYou have access to the following tools:\n${toolsJson}\n\nTo use a tool, you MUST output a JSON object wrapped EXACTLY in these tags:\n<tool_call>\n{"name": "tool_name", "arguments": {"param_name": "value"}}\n</tool_call>\n\nRULES:\n1. You can call multiple tools by outputting multiple <tool_call> blocks consecutively.\n2. Do NOT output any other text after your <tool_call> blocks. Wait for the user to provide the tool response.\n3. The JSON must be valid and accurately follow the tool's parameters.\n4. Do not prefix a final answer with SEARCHING, JSON, or status labels.\n\n`;
       
       if (bodyAny.tool_choice && typeof bodyAny.tool_choice === 'object' && bodyAny.tool_choice.function) {
         const forcedTool = bodyAny.tool_choice.function.name;

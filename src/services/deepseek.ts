@@ -64,7 +64,9 @@ export async function createDeepSeekStream(
     prompt: prompt,
     ref_file_ids: [],
     thinking_enabled: enableThinking,
-    search_enabled: true,
+    // OpenAI-compatible clients provide their own tools. DeepSeek web search
+    // emits provider-specific SEARCHING payloads instead of OpenAI tool calls.
+    search_enabled: false,
     preempt: false
   };
 

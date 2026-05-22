@@ -19,53 +19,6 @@ function setupFetchMock(handler: (url: string, init?: RequestInit) => Response |
   return () => { globalThis.fetch = originalFetch; };
 }
 
-test('web_search tool queries SearXNG and returns simplified results', async () => {
-  const originalFetch = globalThis.fetch;
-  let capturedUrl = '';
-
-  globalThis.fetch = async (input: RequestInfo | URL) => {
-    capturedUrl = typeof input === 'string' ? input : ('url' in input ? input.url : String(input));
-    return new Response(JSON.stringify({
-      results: [{
-        title: 'Result title',
-        url: 'https://example.com/result',
-        content: 'Result snippet',
-        score: 1,
-        engine: 'test-engine',
-        publishedDate: '2026-05-14',
-      }],
-      answers: ['direct answer'],
-      suggestions: ['suggestion'],
-      number_of_results: 1,
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  };
-
-  try {
-    const result = await registry.execute('web_search', {
-      query: 'termo com espaço',
-      limit: 1,
-    }, {
-      messages: [],
-      turn: 0,
-      model: 'deepseek-no-thinking',
-    });
-
-    const parsed = JSON.parse(result);
-    assert.ok(capturedUrl.startsWith('http://searxng:8080/search?'));
-    assert.ok(capturedUrl.includes('q=termo+com+espa%C3%A7o'));
-    assert.ok(capturedUrl.includes('format=json'));
-    assert.strictEqual(parsed.query, 'termo com espaço');
-    assert.strictEqual(parsed.results.length, 1);
-    assert.strictEqual(parsed.results[0].url, 'https://example.com/result');
-    assert.deepStrictEqual(parsed.answers, ['direct answer']);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test('multiturn-thinking-tools: maintains reasoning_content history', async () => {
   let capturedPrompt = '';
 
@@ -349,6 +302,60 @@ test('responses auto_execute_tools executes registered local tools', async () =>
   } finally {
     restore();
     registry.unregister(toolName);
+  }
+});
+
+test('chat completions uses request tools and disables DeepSeek search', async () => {
+  let capturedPayload: any = null;
+
+  const restore = setupFetchMock((url, init) => {
+    capturedPayload = JSON.parse(init?.body as string || '{}');
+    const stream = new ReadableStream({
+      start(c) {
+        c.enqueue(new TextEncoder().encode('data: {"p":"response/content","v":"<tool_call>\\n{\\"name\\":\\"lookup\\",\\"arguments\\":{\\"query\\":\\"abc\\"}}\\n</tool_call>"}\n\n'));
+        c.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
+        c.close();
+      }
+    });
+    return new Response(stream, { status: 200 });
+  });
+
+  try {
+    const req = new Request('http://localhost/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'deepseek-no-thinking',
+        messages: [{ role: 'user', content: 'Look it up' }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'lookup',
+            description: 'Lookup supplied by the client',
+            parameters: {
+              type: 'object',
+              properties: { query: { type: 'string' } },
+              required: ['query'],
+            },
+          },
+        }],
+      }),
+    });
+
+    const res = await app.fetch(req);
+    assert.strictEqual(res.status, 200);
+
+    const body = await res.json();
+    const toolCall = body.choices[0].message.tool_calls[0];
+    assert.strictEqual(body.choices[0].finish_reason, 'tool_calls');
+    assert.strictEqual(body.choices[0].message.content, null);
+    assert.strictEqual(toolCall.function.name, 'lookup');
+    assert.deepStrictEqual(JSON.parse(toolCall.function.arguments), { query: 'abc' });
+    assert.strictEqual(capturedPayload.search_enabled, false);
+    assert.ok(capturedPayload.prompt.includes('"name": "lookup"'));
+    assert.ok(!capturedPayload.prompt.includes('web_search'));
+  } finally {
+    restore();
   }
 });
 

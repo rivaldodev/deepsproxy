@@ -17,10 +17,8 @@ import { models } from './routes/models.ts';
 import { responses } from './routes/responses.ts';
 import * as dotenv from 'dotenv';
 import { initPlaywright } from './services/playwright.ts';
-import { registerWebSearchTool } from './tools/webSearch.ts';
 
 dotenv.config();
-registerWebSearchTool();
 
 export const app = new Hono();
 

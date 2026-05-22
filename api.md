@@ -743,94 +743,32 @@ print(completion.choices[0].message.content)
 - A estimativa de tokens e aproximada, baseada no tamanho do prompt quando o DeepSeek nao informa uso acumulado.
 - `created` e `created_at` usam timestamp Unix em segundos.
 - Para usar tool calling em Chat Completions, implemente no cliente o ciclo: receber `tool_calls`, executar a tool, enviar nova mensagem `tool` com o resultado.
-- Para auto-executar tools no servidor, prefira `/v1/responses` com `auto_execute_tools: true` e registre as tools localmente no `registry`.
+- Para auto-executar tools no servidor, prefira `/v1/responses` com `auto_execute_tools: true`, envie a tool no campo `tools` da request e registre um handler local com o mesmo nome no `registry`.
 - O proxy depende de uma sessao Playwright logada no DeepSeek. Use `/login` quando a sessao expirar ou quando subir em um ambiente novo.
 
-## Tool Local: Web Search
+## Tools Fornecidas Pelo Cliente
 
-O servidor registra automaticamente uma tool local chamada `web_search`.
+O proxy nao registra nem anuncia uma tool de busca propria. Em endpoints OpenAI-compatible, o campo `tools` da request e a fonte das tools que o modelo pode chamar.
 
-Ela consulta o SearXNG interno:
-
-```text
-http://searxng:8080/search?q=TERMO_URLENCODE&format=json
-```
-
-Configuracao por ambiente:
-
-```env
-SEARXNG_SEARCH_URL=http://searxng:8080/search
-SEARXNG_TIMEOUT_MS=15000
-```
-
-Schema da tool:
+Em `/v1/chat/completions`, o proxy converte um bloco de tool emitido pelo modelo para `tool_calls` e devolve a chamada para o cliente executar:
 
 ```json
 {
-  "type": "function",
-  "function": {
-    "name": "web_search",
-    "description": "Search the web using SearXNG and return relevant result titles, URLs, and snippets.",
-    "parameters": {
-      "type": "object",
-      "properties": {
-        "query": {
-          "type": "string",
-          "description": "The web search query.",
-          "minLength": 1
-        },
-        "limit": {
-          "type": "integer",
-          "description": "Maximum number of results to return. Default is 5, maximum is 10.",
-          "minimum": 1,
-          "maximum": 10,
-          "default": 5
+  "finish_reason": "tool_calls",
+  "message": {
+    "role": "assistant",
+    "content": null,
+    "tool_calls": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "arguments": "{\"location\":\"Recife\"}"
         }
-      },
-      "required": ["query"]
-    }
+      }
+    ]
   }
 }
 ```
 
-Para fazer a IA pesquisar e receber os dados automaticamente, use `/v1/responses` com `auto_execute_tools: true`.
-
-Exemplo:
-
-```bash
-curl http://deepsproxy:3000/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer SUA_API_KEY" \
-  -d '{
-    "model": "deepseek-no-thinking",
-    "auto_execute_tools": true,
-    "input": "Pesquise na web por noticias recentes sobre TypeScript e resuma com fontes."
-  }'
-```
-
-Tambem e possivel ativar a auto-execucao globalmente:
-
-```env
-AUTO_EXECUTE_TOOLS=true
-```
-
-Resposta da tool para a IA:
-
-```json
-{
-  "query": "noticias recentes sobre TypeScript",
-  "results": [
-    {
-      "title": "Titulo do resultado",
-      "url": "https://exemplo.com/post",
-      "content": "Snippet retornado pelo SearXNG",
-      "score": 1,
-      "engine": "google",
-      "publishedDate": "2026-05-14"
-    }
-  ],
-  "answers": [],
-  "suggestions": [],
-  "number_of_results": 123
-}
-```
+Em `/v1/responses`, `auto_execute_tools` nao injeta handlers registrados no prompt. O cliente ainda precisa enviar o schema da tool no campo `tools`; o `registry` serve apenas para executar chamadas cujo handler existe localmente.
